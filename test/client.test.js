@@ -18,7 +18,10 @@ test('client bundle registers a lifecycle-owned Plugins Settings tab', async () 
       assert.equal(id, 'react')
       return {}
     })
-    assert.deepEqual(plugin.inject, ['connection', 'remote', 'slots', 'locale', 'settingsScope'])
+    assert.deepEqual(plugin.inject, [
+      'remote', 'remote.settings', 'remote.credentials', 'remote.llm',
+      'slots', 'locale', 'settingsScope',
+    ])
 
     const registrations = []
     const injections = []
@@ -58,10 +61,10 @@ test('client bundle registers a lifecycle-owned Plugins Settings tab', async () 
       },
     }
     let effect
+    const remote = { $on() { return () => {} } }
     const ctx = {
       get(name) {
-        if (name === 'connection') return { api: {} }
-        if (name === 'remote') return { $on() { return () => {} } }
+        if (name === 'remote') return remote
         if (name === 'slots') return slots
         if (name === 'locale') return locale
         if (name === 'settingsScope') return settingsScope
@@ -82,7 +85,7 @@ test('client bundle registers a lifecycle-owned Plugins Settings tab', async () 
     assert.equal(registrations[0].options.name, 'settings.plugins.tab')
     assert.equal(registrations[0].options.id, 'cliproxyapi')
     assert.equal(registrations[0].options.order, 30)
-    assert.equal(typeof registrations[0].options.inject, 'function')
+    assert.deepEqual(registrations[0].options.inject(), { remote, scope })
     assert.equal(typeof registrations[0].component, 'function')
   } finally {
     delete globalThis.window
@@ -106,7 +109,8 @@ test('client owns only its Settings slot and keeps the configuration accessible'
   assert.match(source, /role: 'status'/)
 })
 
-test('initial profile waits until the host writes complete model capabilities', async () => {
+for (const apiKey of ['', 'test-api-key']) {
+test(`initial profile uses Remote and waits for complete capabilities (${apiKey ? 'with key' : 'keyless'})`, async () => {
   let definition
   globalThis.window = {
     __ModuleLoader__: {
@@ -116,7 +120,7 @@ test('initial profile waits until the host writes complete model capabilities', 
     },
   }
   try {
-    await import('../client.js?initial-profile-sync-test')
+    await import(`../client.js?initial-profile-sync-test=${apiKey}`)
     const plugin = definition.factory((id) => {
       assert.equal(id, 'react')
       return {}
@@ -137,14 +141,19 @@ test('initial profile waits until the host writes complete model capabilities', 
     }
     let bootstrap
     let discoveryRequest
-    const ok = (value) => ({ result: { ok: true, value } })
-    const api = {
+    let storedKey
+    const ok = (value) => ({ ok: true, value })
+    const remote = {
       settings: {
-        async describe() {
+        async describe(...args) {
+          assert.deepEqual(args, [])
           return ok({ writable: true, hasDocument: true, namespaces: [currentNamespace] })
         },
-        async mutate(request) {
-          bootstrap = request.ops[0].value
+        async mutate(ns, ops, expectedRevision) {
+          assert.equal(ns, 'llm-pi-ai')
+          assert.equal(expectedRevision, 1)
+          assert.equal(storedKey, apiKey || undefined)
+          bootstrap = ops[0].value
           currentNamespace = {
             ns: 'llm-pi-ai', revision: 2, value: { providers: { CLIProxyAPI: bootstrap } },
           }
@@ -152,16 +161,24 @@ test('initial profile waits until the host writes complete model capabilities', 
         },
       },
       credentials: {
-        async describe() {
-          return ok({ credentials: { DSH_CLIPROXY_API_KEY: { configured: false } } })
+        async describe(refs) {
+          assert.deepEqual(refs, ['DSH_CLIPROXY_API_KEY'])
+          return ok({ DSH_CLIPROXY_API_KEY: { configured: false } })
+        },
+        async set(ref, value) {
+          assert.equal(ref, 'DSH_CLIPROXY_API_KEY')
+          assert.equal(value, apiKey)
+          storedKey = value
+          return ok(undefined)
         },
       },
       llm: {
-        async discoverModels(request) {
+        async discoverModels(settingsNs, request) {
+          assert.equal(settingsNs, 'llm-cliproxyapi')
           discoveryRequest = request
-          return ok({ models: [{
+          return ok([{
             id: 'gpt-5.6-sol', name: 'GPT 5.6 Sol', contextWindow: 372000, maxTokens: 32768,
-          }] })
+          }])
         },
       },
     }
@@ -180,7 +197,7 @@ test('initial profile waits until the host writes complete model capabilities', 
     }
     let settled = false
     const installing = plugin.installInitialProfile(
-      api, scope, 'http://127.0.0.1:8317/v1', '', messages,
+      remote, scope, 'http://127.0.0.1:8317/v1', apiKey, messages,
     ).then((profile) => {
       settled = true
       return profile
@@ -190,7 +207,14 @@ test('initial profile waits until the host writes complete model capabilities', 
       await new Promise((resolve) => setTimeout(resolve, 0))
     }
     assert.ok(bootstrap)
-    assert.equal(discoveryRequest.settingsNs, 'llm-cliproxyapi')
+    assert.deepEqual(discoveryRequest, {
+      provider: 'CLIProxyAPI',
+      baseURL: 'http://127.0.0.1:8317/v1',
+      api: 'openai-responses',
+      ...(apiKey ? { apiKey } : {}),
+    })
+    assert.equal(bootstrap.apiKeyEnv, apiKey ? 'DSH_CLIPROXY_API_KEY' : undefined)
+    assert.equal(bootstrap.headers.authorization, apiKey ? undefined : 'Bearer dsh-cliproxyapi-no-key')
     assert.equal(bootstrap.models[0].input, undefined)
     assert.equal(bootstrap.models[0].reasoningEfforts, undefined)
     assert.match(bootstrap.headers['x-dsh-provider-cpa-sync'], /^rich:/)
@@ -225,6 +249,29 @@ test('initial profile waits until the host writes complete model capabilities', 
     assert.deepEqual(profile.models[0].input, ['text', 'image'])
     assert.deepEqual(profile.models[0].reasoningEfforts, { low: 'low', high: 'high' })
     assert.equal(scopeListeners.length, 0)
+  } finally {
+    delete globalThis.window
+  }
+})
+}
+
+test('initial profile preserves Remote errors without continuing the save', async () => {
+  let definition
+  globalThis.window = { __ModuleLoader__: { load(value) { definition = value } } }
+  try {
+    await import('../client.js?remote-error-test')
+    const plugin = definition.factory(() => ({}))
+    const remote = {
+      settings: {
+        async describe() {
+          return { ok: false, error: { code: 'settings/unavailable', message: 'Settings unavailable' } }
+        },
+      },
+    }
+    await assert.rejects(
+      plugin.installInitialProfile(remote, {}, 'http://127.0.0.1:8317/v1', '', {}),
+      { message: 'Settings unavailable' },
+    )
   } finally {
     delete globalThis.window
   }

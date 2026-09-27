@@ -8,6 +8,8 @@
 
 ## 使用方式
 
+当前版本适配 DeepSeek Harness `0.1.5-rc.3`，使用新版 Remote API，不兼容旧版 `connection.api` 接口。
+
 安装插件：
 
 ```powershell

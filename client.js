@@ -24,7 +24,10 @@ window.__ModuleLoader__.load({
     const SETTINGS_SLOT = 'settings.plugins.tab'
     const SETTINGS_TAB_ID = 'cliproxyapi'
     const SETTINGS_LOCALE_NS = 'settings.cliProxyApi'
-    const inject = ['connection', 'remote', 'slots', 'locale', 'settingsScope']
+    const inject = [
+      'remote', 'remote.settings', 'remote.credentials', 'remote.llm',
+      'slots', 'locale', 'settingsScope',
+    ]
 
     const copy = {
       en: {
@@ -166,13 +169,10 @@ window.__ModuleLoader__.load({
     }
 
     function unwrap(response) {
-      if (!response || !response.result || !response.result.ok) {
-        const message = response && response.result && response.result.error
-          ? response.result.error.message
-          : 'Harness request failed'
-        throw new Error(message)
+      if (!response?.ok) {
+        throw new Error(response?.error?.message || 'Harness request failed')
       }
-      return response.result.value
+      return response.value
     }
 
     function validBaseURL(value, messages) {
@@ -265,34 +265,30 @@ window.__ModuleLoader__.load({
       return ready
     }
 
-    async function installInitialProfile(api, scope, baseURL, apiKey, messages) {
-      const described = unwrap(await api.settings.describe({}))
+    async function installInitialProfile(remote, scope, baseURL, apiKey, messages) {
+      const described = unwrap(await remote.settings.describe())
       const namespace = described.namespaces.find((entry) => entry.ns === PI_NS)
       if (!namespace) throw new Error('The llm-pi-ai settings namespace is unavailable')
 
-      const credentialResult = unwrap(await api.credentials.describe({ refs: [CREDENTIAL_REF] }))
-      const credential = credentialResult.credentials[CREDENTIAL_REF] || { configured: false }
-      const discovered = unwrap(await api.llm.discoverModels({
-        settingsNs: DISCOVERY_NS,
+      const credentialResult = unwrap(await remote.credentials.describe([CREDENTIAL_REF]))
+      const credential = credentialResult[CREDENTIAL_REF] || { configured: false }
+      const discovered = unwrap(await remote.llm.discoverModels(DISCOVERY_NS, {
         provider: PROVIDER,
         baseURL,
         api: 'openai-responses',
         ...(apiKey ? { apiKey } : {}),
-      })).models
+      }))
       if (!discovered.length) throw new Error(messages.noModels)
 
-      if (apiKey) unwrap(await api.credentials.set({ ref: CREDENTIAL_REF, value: apiKey }))
+      if (apiKey) unwrap(await remote.credentials.set(CREDENTIAL_REF, apiKey))
       const hasCredential = Boolean(apiKey || credential.configured)
       const syncToken = createSyncToken()
-      const updated = unwrap(await api.settings.mutate({
-        ns: PI_NS,
-        ops: [{
-          op: 'set',
-          path: ['providers', PROVIDER],
-          value: bootstrapProfileOf(baseURL, discovered, hasCredential, syncToken),
-        }],
-        ...(Number.isInteger(namespace.revision) ? { expectedRevision: namespace.revision } : {}),
-      }))
+      const expectedRevision = Number.isInteger(namespace.revision) ? namespace.revision : undefined
+      const updated = unwrap(await remote.settings.mutate(PI_NS, [{
+        op: 'set',
+        path: ['providers', PROVIDER],
+        value: bootstrapProfileOf(baseURL, discovered, hasCredential, syncToken),
+      }], expectedRevision))
       return waitForProfileSynchronization(scope, baseURL, updated, messages)
     }
 
@@ -313,10 +309,10 @@ window.__ModuleLoader__.load({
       }
     }
 
-    async function credentialStatusOf(api) {
+    async function credentialStatusOf(remote) {
       try {
-        const described = unwrap(await api.credentials.describe({ refs: [CREDENTIAL_REF] }))
-        return described.credentials[CREDENTIAL_REF]?.configured === true
+        const described = unwrap(await remote.credentials.describe([CREDENTIAL_REF]))
+        return described[CREDENTIAL_REF]?.configured === true
           ? 'configured'
           : 'missing'
       } catch {
@@ -324,7 +320,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function SettingsTab({ api, remote, scope, t }) {
+    function SettingsTab({ remote, scope, t }) {
       const snapshot = useSyncExternalStore(
         (listener) => scope.subscribe(listener),
         () => scope.getSnapshot(),
@@ -354,7 +350,7 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         let active = true
         const refresh = async () => {
-          const status = await credentialStatusOf(api)
+          const status = await credentialStatusOf(remote)
           if (active) setCredentialStatus(status)
         }
         void refresh()
@@ -365,7 +361,7 @@ window.__ModuleLoader__.load({
           active = false
           dispose()
         }
-      }, [api, remote])
+      }, [remote])
 
       const submit = async (event) => {
         event.preventDefault()
@@ -376,7 +372,7 @@ window.__ModuleLoader__.load({
         setFeedback({ text: '', error: false })
         try {
           validBaseURL(nextBaseURL, messages)
-          await installInitialProfile(api, scope, nextBaseURL, nextApiKey, messages)
+          await installInitialProfile(remote, scope, nextBaseURL, nextApiKey, messages)
           setApiKey('')
           setFeedback({ text: t('saved'), error: false })
         } catch (error) {
@@ -478,7 +474,6 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
-      const api = ctx.get('connection').api
       const remote = ctx.get('remote')
       const locale = ctx.locale
       const settingsScope = ctx.settingsScope
@@ -496,7 +491,7 @@ window.__ModuleLoader__.load({
         order: 30,
         label: () => t('tab'),
         locale: SETTINGS_LOCALE_NS,
-        inject: () => ({ api, remote, scope }),
+        inject: () => ({ remote, scope }),
       }, SettingsTab))
     }
 

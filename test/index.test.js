@@ -235,7 +235,7 @@ test('first profile synchronization restores capabilities stripped by the browse
       reasoningEfforts: {
         low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
       },
-      compat: { chatTemplateKwargs: {} },
+      compat: { chatTemplateKwargs: {}, chatTemplateArgs: {} },
     })
     assert.deepEqual(profile.models[1].input, ['text'])
     await waitFor(() => harness.timeouts.some((row) => row.delay === 300000))
@@ -243,6 +243,7 @@ test('first profile synchronization restores capabilities stripped by the browse
     periodic.callback()
     await waitFor(() => fetches === 2)
     await waitFor(() => harness.timeouts.filter((row) => row.delay === 300000).length === 2)
+    assert.equal(harness.mutations.length, 1)
     harness.dispose()
   } finally {
     globalThis.fetch = previousFetch

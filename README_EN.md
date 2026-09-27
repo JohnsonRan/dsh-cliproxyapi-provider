@@ -8,6 +8,8 @@ The plugin automatically retrieves the model list from CLIProxyAPI, so models do
 
 ## Usage
 
+This version targets DeepSeek Harness `0.1.5-rc.3` and uses the Remote API, not the legacy `connection.api` interface.
+
 Install the plugin:
 
 ```powershell
