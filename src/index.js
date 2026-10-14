@@ -66,12 +66,17 @@ export function llmPiAiNamespace(ctx) {
  * descriptors instead of per-namespace resolved sections, and the descriptor
  * value is already projected onto the entry's live fields.
  * @param ctx - plugin context owning the settings service.
- * @returns the resolved entry id and its `providers`-bearing section.
+ * @returns the resolved entry id, its `providers`-bearing section, and the
+ *   entry revision that section was read at.
  */
 export function llmPiAiSection(ctx) {
   const ns = llmPiAiNamespace(ctx)
   const descriptor = ctx.settings.describe().find((row) => row.ns === ns)
-  return { ns, section: descriptor?.value }
+  return { ns, section: descriptor?.value, revision: descriptor?.revision }
+}
+
+function isSettingsConflict(error) {
+  return error?.code === 'SETTINGS_CONFLICT'
 }
 
 /** Read one provider profile out of a resolved pi-ai section. */
@@ -342,7 +347,7 @@ export function apply(ctx, config) {
   let observedRefreshKey
 
   const synchronize = async (signal, authOnly = false) => {
-    const { ns, section } = llmPiAiSection(ctx)
+    const { ns, section, revision } = llmPiAiSection(ctx)
     if (section === undefined) {
       throw new Error('The built-in llm-pi-ai plugin entry is not configurable in this profile')
     }
@@ -365,12 +370,16 @@ export function apply(ctx, config) {
     if (signal.aborted) throw signal.reason
     const next = await profileOf(profile, catalog.models, catalog.hasApiKey, config)
     if (!isDeepStrictEqual(next, profile)) {
+      // `next` is rebuilt from the profile read above, across a catalog fetch.
+      // Fence the write on that read so an edit landing meanwhile (one outside
+      // the refresh key, like timeoutMs, does not abort this run) is refused
+      // instead of silently reverted; the conflict reruns on the fresh profile.
       observedRefreshKey = refreshKeyOf(next, config)
       await ctx.settings.mutate(ns, [{
         op: 'set',
         path: ['providers', PROVIDER],
         value: next,
-      }])
+      }], revision)
     }
     return true
   }
@@ -417,6 +426,11 @@ export function apply(ctx, config) {
           else if (hasProfile && !rerun) wakeAfter(config.refreshIntervalMs)
         } catch (error) {
           if (controller.signal.aborted || stopped) continue
+          if (isSettingsConflict(error)) {
+            if (authOnly) authOnlyRequested = true
+            rerun = true
+            continue
+          }
           failures += 1
           const message = error instanceof Error ? error.message : String(error)
           if (message !== lastError) {

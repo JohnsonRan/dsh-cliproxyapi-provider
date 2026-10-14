@@ -57,6 +57,7 @@ function createContext(initialSection, initialCredential, options = {}) {
   let section = initialSection
   let credential = initialCredential
   let revision = 0
+  let conflicts = 0
   const discoveries = new Map()
   const listeners = new Map()
   const mutations = []
@@ -88,7 +89,11 @@ function createContext(initialSection, initialCredential, options = {}) {
       describe() {
         return [{ ns: entryId, revision, applies: 'live', value: section }]
       },
-      async mutate(ns, ops) {
+      async mutate(ns, ops, expectedRevision) {
+        if (expectedRevision !== undefined && expectedRevision !== revision) {
+          conflicts += 1
+          throw Object.assign(new Error('settings conflict'), { code: 'SETTINGS_CONFLICT' })
+        }
         mutations.push(ops)
         mutationNamespaces.push(ns)
         const providers = { ...(section?.providers || {}) }
@@ -141,6 +146,7 @@ function createContext(initialSection, initialCredential, options = {}) {
     entryId,
     entryName,
     get section() { return section },
+    get conflicts() { return conflicts },
     setSection(value) { section = value },
     setCredential(value) { credential = value },
     emit,
@@ -455,6 +461,46 @@ test('a newer settings change aborts stale discovery and only installs the lates
     await waitFor(() => harness.mutations.length === 1)
     const profile = harness.mutations[0][0].value
     assert.equal(profile.baseURL, 'http://127.0.0.1:9417/v1')
+    assert.deepEqual(profile.models.map((model) => model.id), ['model-b'])
+    harness.dispose()
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('a profile edit outside the refresh key during discovery is not reverted', async () => {
+  const previousFetch = globalThis.fetch
+  let markStarted
+  let release
+  const started = new Promise((resolve) => { markStarted = resolve })
+  const gate = new Promise((resolve) => { release = resolve })
+  let fetches = 0
+  globalThis.fetch = async () => {
+    fetches += 1
+    if (fetches === 1) {
+      markStarted()
+      await gate
+    }
+    return new Response(JSON.stringify({ models: [{ slug: 'model-b' }] }), { status: 200 })
+  }
+  try {
+    const harness = createContext({ providers: {
+      CLIProxyAPI: managedProfile(),
+    } })
+    apply(harness.ctx, await resolvedConfig())
+    await started
+    // timeoutMs is not part of the refresh key, so this edit does not abort
+    // the in-flight run; only the revision fence keeps it from being reverted.
+    harness.setSection({ providers: {
+      CLIProxyAPI: managedProfile({ timeoutMs: 1234 }),
+    } })
+    harness.settingsDocumentUpdated()
+    release()
+    await waitFor(() => harness.mutations.length === 1)
+    assert.equal(harness.conflicts, 1)
+    assert.equal(harness.warnings.length, 0)
+    const profile = harness.mutations[0][0].value
+    assert.equal(profile.timeoutMs, 1234)
     assert.deepEqual(profile.models.map((model) => model.id), ['model-b'])
     harness.dispose()
   } finally {
