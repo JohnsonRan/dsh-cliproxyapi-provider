@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context, Service, resolveConfig } from '@deepseek-ai/cordis'
+import { deepEqual, updateVolatile, volatileEntries } from '@deepseek-ai/cosmokit'
 import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import { createUserMessage, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import {
@@ -9,13 +10,19 @@ import {
   inject as piAiInject,
   name as piAiName,
 } from '@deepseek-ai/dsh-llm-pi-ai'
-import { SettingsProvider } from '@deepseek-ai/dsh-settings'
+// 0.2 replaced the abstract `SettingsProvider` seam with `SettingsForms`, which
+// projects the *config editor*'s active entries into per-entry descriptors.
+import { SettingsForms } from '@deepseek-ai/dsh-settings'
 import {
   Config,
   PLACEHOLDER_AUTHORIZATION,
   PROFILE_SYNC_HEADER,
   apply,
+  inject as pluginInject,
+  llmPiAiNamespace,
 } from '../src/index.js'
+
+const PI_AI_ENTRY_NAME = '@deepseek-ai/dsh-llm-pi-ai'
 
 async function resolvedConfig(overrides = {}) {
   const result = await Config['~standard'].validate(overrides)
@@ -37,17 +44,37 @@ function managedProfile(overrides = {}) {
   }
 }
 
-function createContext(initialSection, initialCredential) {
+/**
+ * Shape one unit-level fake of the 0.2 host seams. The settings namespace is the
+ * *config editor entry id* rather than a fixed string, `settings.describe()`
+ * answers with descriptors (not sections), and a write announces itself through
+ * `settings/document-updated` — exactly what `SettingsForms.write()` does at the
+ * end of every successful mutate.
+ */
+function createContext(initialSection, initialCredential, options = {}) {
+  const entryId = options.entryId ?? 'llm-pi-ai'
+  const entryName = options.entryName ?? PI_AI_ENTRY_NAME
   let section = initialSection
   let credential = initialCredential
+  let revision = 0
   const discoveries = new Map()
   const listeners = new Map()
   const mutations = []
+  const mutationNamespaces = []
   const warnings = []
   const effects = []
   const timeouts = []
 
+  const emit = (event, ...args) => {
+    for (const listener of listeners.get(event) || []) listener(...args)
+  }
+
   const ctx = {
+    configEditor: {
+      // `llmPiAiNamespace()` keys on the composition's own name, not the id.
+      entries: () => [{ id: entryId, name: entryName, options: { id: entryId, name: entryName, config: {} } }],
+      get documentPath() { return '/tmp/dsh-cliproxyapi-unit-profile.yml' },
+    },
     llm: {
       registerModelDiscovery(ns, handler) {
         discoveries.set(String(ns), handler)
@@ -58,18 +85,21 @@ function createContext(initialSection, initialCredential) {
       },
     },
     settings: {
-      get() {
-        return section
+      describe() {
+        return [{ ns: entryId, revision, applies: 'live', value: section }]
       },
-      async mutate(_ns, ops) {
+      async mutate(ns, ops) {
         mutations.push(ops)
-        const providers = { ...(section.providers || {}) }
+        mutationNamespaces.push(ns)
+        const providers = { ...(section?.providers || {}) }
         for (const op of ops) {
           assert.equal(op.path[0], 'providers')
           if (op.op === 'set') providers[op.path[1]] = op.value
           else delete providers[op.path[1]]
         }
         section = { ...section, providers }
+        revision += 1
+        emit('settings/document-updated', ns, revision)
       },
     },
     credentials: {
@@ -105,13 +135,19 @@ function createContext(initialSection, initialCredential) {
     ctx,
     discoveries,
     mutations,
+    mutationNamespaces,
     warnings,
     timeouts,
+    entryId,
+    entryName,
     get section() { return section },
     setSection(value) { section = value },
     setCredential(value) { credential = value },
-    emit(event, ...args) {
-      for (const listener of listeners.get(event) || []) listener(...args)
+    emit,
+    /** Reproduce the `(ns, revision)` shape of `settings/document-updated`. */
+    settingsDocumentUpdated(ns = entryId) {
+      revision += 1
+      emit('settings/document-updated', ns, revision)
     },
     dispose() {
       for (const effect of effects.reverse()) effect()
@@ -119,7 +155,7 @@ function createContext(initialSection, initialCredential) {
   }
 }
 
-async function waitFor(predicate, timeoutMs = 1000) {
+async function waitFor(predicate, timeoutMs = 2000) {
   const deadline = Date.now() + timeoutMs
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error('timed out waiting for condition')
@@ -220,7 +256,7 @@ test('first profile synchronization restores capabilities stripped by the browse
         },
       }),
     } })
-    harness.emit('settings/updated', 'llm-pi-ai', harness.section, undefined, 'update')
+    harness.settingsDocumentUpdated()
 
     await waitFor(() => harness.mutations.length === 1)
     const profile = harness.mutations[0][0].value
@@ -307,7 +343,7 @@ test('keyless profiles omit apiKeyEnv and receive a non-sensitive placeholder he
     assert.equal(profile.apiKeyEnv, undefined)
     assert.equal(profile.headers.authorization, PLACEHOLDER_AUTHORIZATION)
     assert.equal(profile.models[0].id, 'model-a')
-    harness.emit('settings/updated', 'llm-pi-ai', harness.section, undefined, 'update')
+    harness.settingsDocumentUpdated()
     await new Promise((resolve) => setTimeout(resolve, 25))
     assert.equal(harness.mutations.length, 1)
     assert.equal(fetches, 1)
@@ -368,6 +404,31 @@ test('credential removal regenerates the profile in keyless mode', async () => {
   }
 })
 
+test('a renamed pi-ai entry keeps its own id as the settings namespace', async () => {
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response(JSON.stringify({ models: [{ slug: 'model-a' }] }), { status: 200 })
+  try {
+    // A deployment may rename the profile entry; `options.name` stays the
+    // composition's own name, so the entry (and therefore the write target) is
+    // found by name while the namespace is the renamed id.
+    const harness = createContext({ providers: {
+      CLIProxyAPI: managedProfile(),
+    } }, undefined, { entryId: 'my-piai' })
+    assert.equal(llmPiAiNamespace(harness.ctx), 'my-piai')
+    apply(harness.ctx, await resolvedConfig())
+    await waitFor(() => harness.mutations.length === 1)
+    assert.deepEqual(harness.mutationNamespaces, ['my-piai'])
+    assert.equal(harness.mutations[0][0].path[1], 'CLIProxyAPI')
+    assert.equal(harness.mutations[0][0].value.baseURL, 'http://127.0.0.1:8317/v1')
+    harness.settingsDocumentUpdated('my-piai')
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    assert.equal(harness.mutations.length, 1)
+    harness.dispose()
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
 test('a newer settings change aborts stale discovery and only installs the latest profile', async () => {
   const previousFetch = globalThis.fetch
   let markFirstStarted
@@ -390,7 +451,7 @@ test('a newer settings change aborts stale discovery and only installs the lates
     harness.setSection({ providers: {
       CLIProxyAPI: managedProfile({ baseURL: 'http://127.0.0.1:9417/v1' }),
     } })
-    harness.emit('settings/updated', 'llm-pi-ai', harness.section, undefined, 'update')
+    harness.settingsDocumentUpdated()
     await waitFor(() => harness.mutations.length === 1)
     const profile = harness.mutations[0][0].value
     assert.equal(profile.baseURL, 'http://127.0.0.1:9417/v1')
@@ -424,21 +485,64 @@ test('catalog requests honor timeout and failed refreshes use exponential backof
   }
 })
 
+test('catalog transport failures keep their actionable host-side diagnostics', async () => {
+  const previousFetch = globalThis.fetch
+  const harness = createContext({ providers: {} })
+  apply(harness.ctx, await resolvedConfig())
+  const discover = harness.discoveries.get('llm-cliproxyapi')
+  const request = () => ({
+    provider: 'CLIProxyAPI',
+    baseURL: 'http://127.0.0.1:8317/v1',
+    apiKey: 'secret-key',
+    signal: new AbortController().signal,
+  })
+  try {
+    globalThis.fetch = async () => new Response('denied', { status: 401 })
+    await assert.rejects(discover(request()), /answered 401; save a valid API key in Settings/)
+
+    globalThis.fetch = async () => new Response('denied', { status: 403 })
+    await assert.rejects(discover(request()), /answered 403; save a valid API key in Settings/)
+
+    globalThis.fetch = async () => new Response('<html>gateway</html>', { status: 200 })
+    await assert.rejects(discover(request()), (error) => {
+      assert.match(error.message, /did not return usable JSON/)
+      assert.equal(error.cause?.name, 'SyntaxError')
+      return true
+    })
+
+    // A declared length is refused before the body is read, so a body that never
+    // produces a byte still fails fast; a chunked body that never declares one is
+    // refused mid-read. Both keep 4 MiB as the ceiling and both reach the caller
+    // through the same "usable JSON" wrapper, so the specific reason is asserted
+    // on the cause.
+    globalThis.fetch = async () => new Response(new ReadableStream({ start() {} }), {
+      status: 200,
+      headers: { 'content-length': String(4 * 1024 * 1024 + 1) },
+    })
+    await assert.rejects(discover(request()), (error) => {
+      assert.match(error.message, /did not return usable JSON/)
+      assert.match(String(error.cause?.message), /exceeds 4 MiB/)
+      return true
+    })
+
+    const oversized = new Uint8Array(4 * 1024 * 1024 + 1)
+    globalThis.fetch = async () => new Response(oversized, { status: 200 })
+    await assert.rejects(discover(request()), (error) => {
+      assert.match(error.message, /did not return usable JSON/)
+      assert.match(String(error.cause?.message), /exceeds 4 MiB/)
+      return true
+    })
+    harness.dispose()
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
 test('real Cordis composition leaves llm-pi-ai as the sole directory owner', async () => {
   const previousFetch = globalThis.fetch
   let inferenceAuthorization
   let catalogFetches = 0
-  const document = {
-    'llm-pi-ai': {
-      providers: {},
-    },
-  }
-
-  class MemorySettings extends SettingsProvider {
-    writable = true
-    async load() { return structuredClone(document) }
-    async persist(ns, section) { document[ns] = structuredClone(section) }
-  }
+  const entryId = 'llm-pi-ai'
 
   class MemoryCredentials extends CredentialProvider {
     async resolve() { return undefined }
@@ -482,11 +586,79 @@ test('real Cordis composition leaves llm-pi-ai as the sole directory owner', asy
   const ctx = new Context()
   const fibers = []
   try {
-    fibers.push(ctx.plugin(LlmRuntime))
-    fibers.push(ctx.plugin(MemorySettings))
-    fibers.push(ctx.plugin(MemoryCredentials))
-    fibers.push(ctx.plugin(TimerService))
-    await Promise.all(fibers.map((fiber) => fiber.await()))
+    // 0.2 has no `SettingsProvider`: the settings seam is `SettingsForms`, which
+    // derives its descriptors from the config editor's active entries. The real
+    // editor writes profile YAML, so this composition installs an in-memory
+    // editor that reproduces the one step that matters for a live edit: re-resolve
+    // the entry's raw config (running the plugin's own `internal/config`
+    // waterfall, where llm-pi-ai validates every changed route), commit its
+    // volatile references, and announce `loader/volatile-update` exactly as
+    // `Loader`'s `_commitVolatile()` does.
+    const piEntry = {
+      id: entryId,
+      name: piAiName,
+      options: { id: entryId, name: piAiName, config: { providers: {} } },
+      fiber: undefined,
+    }
+    const cpaEntry = {
+      id: 'llm-cliproxyapi',
+      name: 'llm-cliproxyapi',
+      options: { id: 'llm-cliproxyapi', name: 'llm-cliproxyapi', config: {} },
+      fiber: undefined,
+    }
+
+    const fakeConfigEditor = {
+      entries: () => [cpaEntry, piEntry],
+      configuration: () => [
+        { entry: cpaEntry, inherited: {}, override: {} },
+        { entry: piEntry, inherited: {}, override: structuredClone(piEntry.options.config ?? {}) },
+      ],
+      get documentPath() { return '/tmp/dsh-cliproxyapi-profile.yml' },
+      async edit(entry, change) {
+        const current = structuredClone(entry.options.config ?? {})
+        const next = change(current, {})
+        const fiber = entry.fiber
+        if (fiber.state !== 2) throw new Error('Configuration plugin is no longer active')
+        const candidate = resolveConfig(
+          fiber.runtime,
+          fiber.ctx.waterfall(fiber, 'internal/config', next, () => next),
+        )
+        const paths = volatileEntries(fiber.config).flatMap(({ path, ref }) => {
+          const source = path.reduce((value, key) => Reflect.get(value, key), candidate)
+          if (deepEqual(ref.get(), source.get(), true)) return []
+          updateVolatile(ref, source)
+          return [path]
+        })
+        entry.options.config = next
+        if (paths.length) {
+          const self = Object.create(fiber.ctx)
+          self[Context.filter] = (owner) => owner.fiber === fiber
+          fiber.ctx.emit(self, 'loader/volatile-update', paths)
+        }
+      },
+    }
+
+    const infrastructure = ctx.plugin({
+      inject: [],
+      apply(child) {
+        child.provide('loader', { await: async () => {}, entries: () => [] })
+        child.provide('profileContext', {
+          name: 'test',
+          home: '/nonexistent-dsh-cliproxyapi-home',
+          dir: '/nonexistent-dsh-cliproxyapi-home',
+          patchPath: '/nonexistent-dsh-cliproxyapi-home/profile.yml',
+          installAnchor: '/nonexistent-dsh-cliproxyapi-home',
+        })
+        child.provide('configEditor', fakeConfigEditor)
+      },
+    })
+    fibers.push(
+      ctx.plugin(LlmRuntime),
+      ctx.plugin(MemoryCredentials),
+      ctx.plugin(TimerService),
+      ctx.plugin(SettingsForms),
+    )
+    await Promise.all([infrastructure.await(), ...fibers.map((fiber) => fiber.await())])
 
     const piFiber = ctx.plugin({
       name: piAiName,
@@ -494,11 +666,25 @@ test('real Cordis composition leaves llm-pi-ai as the sole directory owner', asy
       Config: PiAiConfig,
       apply: applyPiAi,
     }, { providers: {} })
-    const cpaFiber = ctx.plugin({ name: 'llm-cliproxyapi', inject: ['settings', 'credentials', 'llm', 'timer'], Config, apply }, {
+    // `ctx.plugin()` hands back an `Object.create(fiber)` wrapper; the fiber the
+    // plugin actually runs in is its prototype, which is also what `ctx.fiber`
+    // resolves to inside `apply`. Giving it the loader `entry` is what a real
+    // profile does, so llm-pi-ai reports the entry id as its settings namespace.
+    piEntry.fiber = Object.getPrototypeOf(piFiber)
+    piEntry.fiber.entry = piEntry
+    fibers.push(piFiber)
+    assert.deepEqual([...pluginInject], ['settings', 'credentials', 'llm', 'timer', 'configEditor'])
+
+    const cpaFiber = ctx.plugin({
+      name: 'llm-cliproxyapi',
+      inject: pluginInject,
+      Config,
+      apply,
+    }, {
       retryInitialMs: 10,
       retryMaxMs: 20,
     })
-    fibers.push(piFiber, cpaFiber)
+    fibers.push(cpaFiber)
     await Promise.all([piFiber.await(), cpaFiber.await()])
 
     const discovered = await ctx.llm.discoverModels('llm-cliproxyapi', {
@@ -506,13 +692,19 @@ test('real Cordis composition leaves llm-pi-ai as the sole directory owner', asy
       baseURL: 'http://127.0.0.1:8317/v1',
       signal: new AbortController().signal,
     })
+    // The browser-facing RPC narrows every discovered model to
+    // id/name/contextWindow/maxTokens (0.2 also keeps `inputModalities`), so the
+    // pi-ai capability fields never survive the round trip.
     assert.equal(discovered[0].input, undefined)
     assert.equal(discovered[1].reasoningEfforts, undefined)
-    await ctx.settings.mutate('llm-pi-ai', [{
+    const bootstrapModels = discovered.map(({ id, name, contextWindow, maxTokens }) => ({
+      id, name, contextWindow, maxTokens,
+    }))
+    await ctx.settings.mutate(entryId, [{
       op: 'set',
       path: ['providers', 'CLIProxyAPI'],
       value: managedProfile({
-        models: discovered,
+        models: bootstrapModels,
         headers: {
           [PROFILE_SYNC_HEADER]: 'rich:integration-test',
           authorization: PLACEHOLDER_AUTHORIZATION,
@@ -520,16 +712,35 @@ test('real Cordis composition leaves llm-pi-ai as the sole directory owner', asy
       }),
     }])
 
-    await waitFor(() => ctx.settings.get('llm-pi-ai')?.providers?.CLIProxyAPI?.models?.[0]?.id === 'plain')
-    await waitFor(() => ctx.settings.get('llm-pi-ai').providers.CLIProxyAPI.headers[PROFILE_SYNC_HEADER] === undefined)
+    const sectionNow = () => ctx.settings.describe()
+      .find((row) => row.ns === entryId)?.value?.providers?.CLIProxyAPI
+    // The bootstrap profile the browser RPC shaped already carries the discovered
+    // ids, so wait on signals only the host-side synchronization produces: the
+    // stripped sync header and the capability map the RPC dropped.
+    await waitFor(() => sectionNow()?.headers?.[PROFILE_SYNC_HEADER] === undefined)
+    await waitFor(() => sectionNow()?.models?.[1]?.reasoningEfforts?.high === 'high')
     assert.equal(catalogFetches, 1)
     const directories = ctx.llm.listConfigurableProviders().filter((entry) => entry.provider === 'CLIProxyAPI')
     assert.equal(directories.length, 1)
-    assert.equal(directories[0].settingsNs, 'llm-pi-ai')
+    assert.equal(directories[0].settingsNs, entryId)
     assert.equal(ctx.llm.listProviders().some((provider) => provider.id === 'CLIProxyAPI'), true)
-    const models = ctx.settings.get('llm-pi-ai').providers.CLIProxyAPI.models
+    const models = sectionNow().models
     assert.equal(models[0].reasoningEfforts, undefined)
     assert.deepEqual(models[1].reasoningEfforts, { off: 'none', high: 'high' })
+
+    // Negative control: the very same `internal/config` waterfall the editor
+    // above runs, driven with an unserviceable profile, and refused by real
+    // llm-pi-ai validation — which is what makes the accepted write above
+    // evidence rather than a coincidence.
+    assert.throws(
+      () => piEntry.fiber.ctx.waterfall(
+        piEntry.fiber,
+        'internal/config',
+        { providers: { CLIProxyAPI: { baseURL: '' } } },
+        (value) => value,
+      ),
+      /empty baseURL/,
+    )
 
     const chunks = []
     for await (const chunk of ctx.llm.stream({
@@ -542,6 +753,9 @@ test('real Cordis composition leaves llm-pi-ai as the sole directory owner', asy
     })) chunks.push(chunk)
     assert.equal(inferenceAuthorization, PLACEHOLDER_AUTHORIZATION)
     assert.equal(chunks.at(-1)?.type, 'finish')
+    // The keyless placeholder reached the provider and failed on its 503 rather
+    // than being short-circuited for a missing credential.
+    assert.equal(chunks.at(-1)?.reason?.kind, 'error')
     assert.notEqual(chunks.at(-1)?.reason?.failure?.code, 'MISSING_CREDENTIAL')
   } finally {
     globalThis.fetch = previousFetch

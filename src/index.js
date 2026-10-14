@@ -9,6 +9,7 @@ const MAX_CATALOG_BYTES = 4 * 1024 * 1024
 const DISCOVERY_HANDOFF_TTL_MS = 60000
 const MAX_DISCOVERY_HANDOFFS = 8
 const DISCOVERY_NS = 'llm-cliproxyapi'
+const PI_AI_ENTRY_NAME = '@deepseek-ai/dsh-llm-pi-ai'
 const PI_NS = 'llm-pi-ai'
 const API_KEY_REF = credentialRef('DSH_CLIPROXY_API_KEY')
 const PROVIDER = 'CLIProxyAPI'
@@ -17,7 +18,7 @@ export const PROFILE_SYNC_HEADER = 'x-dsh-provider-cpa-sync'
 export const PLACEHOLDER_AUTHORIZATION = 'Bearer dsh-cliproxyapi-no-key'
 
 export const name = 'llm-cliproxyapi'
-export const inject = ['settings', 'credentials', 'llm', 'timer']
+export const inject = ['settings', 'credentials', 'llm', 'timer', 'configEditor']
 
 export const Config = z.object({
   defaultContextWindow: z.number().step(1).min(1).default(262144),
@@ -43,6 +44,49 @@ function normalizedBaseURL(value) {
     throw new TypeError('CLIProxyAPI baseURL must use http or https')
   }
   return baseURL
+}
+
+/**
+ * Resolve the profile row that owns the pi-ai provider routes. The entry id is
+ * the settings namespace in DeepSeek Harness 0.2, and a deployment may rename
+ * it, so the composition's own name is authoritative and the mounted default is
+ * the fallback.
+ * @param ctx - plugin context owning the config editor and settings services.
+ * @returns the loader entry id whose `providers` dict this plugin maintains.
+ */
+export function llmPiAiNamespace(ctx) {
+  const entries = ctx.configEditor?.entries?.() ?? []
+  const entry = entries.find((row) => row?.options?.name === PI_AI_ENTRY_NAME)
+    ?? entries.find((row) => row?.options?.id === PI_NS)
+  return entry?.options?.id ?? PI_NS
+}
+
+/**
+ * Read the pi-ai form values from the settings service. 0.2 exposes per-entry
+ * descriptors instead of per-namespace resolved sections, and the descriptor
+ * value is already projected onto the entry's live fields.
+ * @param ctx - plugin context owning the settings service.
+ * @returns the resolved entry id and its `providers`-bearing section.
+ */
+export function llmPiAiSection(ctx) {
+  const ns = llmPiAiNamespace(ctx)
+  const descriptor = ctx.settings.describe().find((row) => row.ns === ns)
+  return { ns, section: descriptor?.value }
+}
+
+/** Read one provider profile out of a resolved pi-ai section. */
+export function providerProfileOf(section) {
+  return section?.providers?.[PROVIDER]
+}
+
+/**
+ * Unwrap the provider dict a schemastery parse produced. A `volatile` dict
+ * resolves to a stable reference, so its value arrives through `get()`.
+ */
+function parsedProviders(parsed) {
+  const providers = parsed?.providers
+  if (providers === undefined) return undefined
+  return typeof providers.get === 'function' ? providers.get() : providers
 }
 
 function headerKey(headers, expected) {
@@ -235,7 +279,10 @@ async function profileOf(profile, models, hasApiKey, config) {
   if (validated.issues?.length) {
     throw new Error(`llm-pi-ai rejected the generated provider profile: ${validated.issues[0].message}`)
   }
-  return validated.value.providers[PROVIDER]
+  const providers = parsedProviders(validated.value)
+  const resolved = providers?.[PROVIDER]
+  if (resolved === undefined) throw new Error('llm-pi-ai resolved no provider profile for ' + PROVIDER)
+  return structuredClone(resolved)
 }
 
 function retryDelay(config, failures) {
@@ -295,9 +342,11 @@ export function apply(ctx, config) {
   let observedRefreshKey
 
   const synchronize = async (signal, authOnly = false) => {
-    const section = ctx.settings.get(PI_NS)
-    if (section === undefined) throw new Error('The built-in llm-pi-ai settings namespace is not ready')
-    const profile = section.providers?.[PROVIDER]
+    const { ns, section } = llmPiAiSection(ctx)
+    if (section === undefined) {
+      throw new Error('The built-in llm-pi-ai plugin entry is not configurable in this profile')
+    }
+    const profile = providerProfileOf(section)
     if (!profile) return false
     if (authOnly && profileSynchronizationPending(profile)) return true
     if (signal.aborted) throw signal.reason
@@ -317,7 +366,7 @@ export function apply(ctx, config) {
     const next = await profileOf(profile, catalog.models, catalog.hasApiKey, config)
     if (!isDeepStrictEqual(next, profile)) {
       observedRefreshKey = refreshKeyOf(next, config)
-      await ctx.settings.mutate(PI_NS, [{
+      await ctx.settings.mutate(ns, [{
         op: 'set',
         path: ['providers', PROVIDER],
         value: next,
@@ -396,15 +445,18 @@ export function apply(ctx, config) {
   }
 
   const scheduleFromSettings = (force = false) => {
-    const profile = ctx.settings.get(PI_NS)?.providers?.[PROVIDER]
-    const refreshKey = refreshKeyOf(profile, config)
+    const { section } = llmPiAiSection(ctx)
+    const refreshKey = refreshKeyOf(providerProfileOf(section), config)
     if (!force && refreshKey === observedRefreshKey) return
     observedRefreshKey = refreshKey
     schedule()
   }
 
-  ctx.on('settings/updated', (ns) => {
-    if (ns === PI_NS) scheduleFromSettings()
+  // The service emits this from inside `describe()`, the same read this
+  // listener needs, so the refresh starts after that stack unwinds.
+  ctx.on('settings/document-updated', (ns) => {
+    if (ns !== llmPiAiNamespace(ctx)) return
+    queueMicrotask(() => scheduleFromSettings())
   })
   ctx.on('credentials/reference-updated', (ref) => {
     if (ref === API_KEY_REF) schedule({ authOnly: true })

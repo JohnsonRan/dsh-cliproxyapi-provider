@@ -26,7 +26,7 @@ window.__ModuleLoader__.load({
     const SETTINGS_LOCALE_NS = 'settings.cliProxyApi'
     const inject = [
       'remote', 'remote.settings', 'remote.credentials', 'remote.llm',
-      'slots', 'locale', 'settingsScope',
+      'slots', 'locale', 'configForms', 'settingsSchema',
     ]
 
     const copy = {
@@ -49,6 +49,7 @@ window.__ModuleLoader__.load({
         baseRequired: 'Base URL is required.',
         baseInvalid: 'Base URL must be a valid HTTP or HTTPS URL.',
         noModels: 'CLIProxyAPI returned no usable models.',
+        namespaceUnavailable: 'The llm-pi-ai provider settings are unavailable in this profile.',
       },
       zh: {
         tab: 'CLIProxyAPI',
@@ -69,6 +70,7 @@ window.__ModuleLoader__.load({
         baseRequired: '请填写 Base URL。',
         baseInvalid: 'Base URL 必须是有效的 HTTP 或 HTTPS 地址。',
         noModels: 'CLIProxyAPI 未返回可用模型。',
+        namespaceUnavailable: '当前配置中无法访问 llm-pi-ai 供应商设置。',
       },
     }
 
@@ -265,10 +267,11 @@ window.__ModuleLoader__.load({
       return ready
     }
 
-    async function installInitialProfile(remote, scope, baseURL, apiKey, messages) {
+    async function installInitialProfile(remote, scope, baseURL, apiKey, messages, requestedNamespace) {
       const described = unwrap(await remote.settings.describe())
-      const namespace = described.namespaces.find((entry) => entry.ns === PI_NS)
-      if (!namespace) throw new Error('The llm-pi-ai settings namespace is unavailable')
+      const ns = requestedNamespace ?? settingsNamespaceOf(described, undefined)
+      const namespace = described.namespaces.find((entry) => entry.ns === ns)
+      if (!namespace) throw new Error(messages.namespaceUnavailable)
 
       const credentialResult = unwrap(await remote.credentials.describe([CREDENTIAL_REF]))
       const credential = credentialResult[CREDENTIAL_REF] || { configured: false }
@@ -284,7 +287,7 @@ window.__ModuleLoader__.load({
       const hasCredential = Boolean(apiKey || credential.configured)
       const syncToken = createSyncToken()
       const expectedRevision = Number.isInteger(namespace.revision) ? namespace.revision : undefined
-      const updated = unwrap(await remote.settings.mutate(PI_NS, [{
+      const updated = unwrap(await remote.settings.mutate(ns, [{
         op: 'set',
         path: ['providers', PROVIDER],
         value: bootstrapProfileOf(baseURL, discovered, hasCredential, syncToken),
@@ -300,12 +303,47 @@ window.__ModuleLoader__.load({
       return providers[PROVIDER]
     }
 
+    /** Whether one described entry's form schema declares the pi-ai provider dict. */
+    function declaresProviders(entry, settingsSchema) {
+      if (!entry?.schema || !settingsSchema) return false
+      try {
+        return settingsSchema.nodeAtPath(settingsSchema.rehydrate(entry.schema), ['providers']) !== undefined
+      } catch {
+        return false
+      }
+    }
+
+    /**
+     * Resolve the provider entry this page edits. DeepSeek Harness 0.2 keys
+     * settings by plugin entry id, which a deployment may rename, so the owning
+     * entry is recognized by its live `providers` form field — first wherever
+     * CLIProxyAPI is already configured, then the sole pi-ai-shaped entry, and
+     * finally the composition's default id.
+     */
+    function settingsNamespaceOf(described, settingsSchema) {
+      const namespaces = Array.isArray(described?.namespaces) ? described.namespaces : []
+      const candidates = namespaces.filter((entry) => declaresProviders(entry, settingsSchema))
+      const owned = candidates.find((entry) => {
+        return profileOf({ value: entry.value }) !== undefined
+          || profileOf({ value: entry.user }) !== undefined
+      })
+      const fallback = namespaces.find((entry) => entry.ns === PI_NS)
+      return (owned ?? candidates[0] ?? fallback)?.ns
+    }
+
+    const idleSettingsSnapshot = {
+      status: 'loading', value: undefined, revision: undefined, writable: false,
+    }
+    const noSubscription = () => () => {}
+    const idleSnapshot = () => idleSettingsSnapshot
+
     function messagesOf(t) {
       return {
         baseRequired: t('baseRequired'),
         baseInvalid: t('baseInvalid'),
         noModels: t('noModels'),
         syncTimeout: t('syncTimeout'),
+        namespaceUnavailable: t('namespaceUnavailable'),
       }
     }
 
@@ -320,12 +358,41 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function SettingsTab({ remote, scope, t }) {
-      const snapshot = useSyncExternalStore(
-        (listener) => scope.subscribe(listener),
-        () => scope.getSnapshot(),
-        () => scope.getSnapshot(),
+    function SettingsTab({ remote, configForms, settingsSchema, t }) {
+      const mirror = configForms.describe()
+      const described = useSyncExternalStore(
+        (listener) => mirror.subscribe(listener),
+        () => mirror.getSnapshot(),
+        () => mirror.getSnapshot(),
       )
+      useEffect(() => {
+        void mirror.ensure().catch(() => {})
+      }, [mirror])
+      const namespace = useMemo(
+        () => settingsNamespaceOf(described.view, settingsSchema),
+        [described.view, settingsSchema],
+      )
+      const form = useMemo(
+        () => (namespace === undefined ? undefined : configForms.get(namespace)),
+        [configForms, namespace],
+      )
+      const subscribeForm = useMemo(
+        () => (form === undefined ? noSubscription : (listener) => form.subscribe(listener)),
+        [form],
+      )
+      const readForm = useMemo(
+        () => (form === undefined ? idleSnapshot : () => form.getSnapshot()),
+        [form],
+      )
+      const scopeSnapshot = useSyncExternalStore(subscribeForm, readForm, readForm)
+      const unavailable = described.status === 'unavailable'
+        || (described.status === 'ready' && namespace === undefined)
+      const snapshot = {
+        ...scopeSnapshot,
+        status: scopeSnapshot.status === 'unavailable' || unavailable
+          ? 'unavailable'
+          : scopeSnapshot.status,
+      }
       const profile = profileOf(snapshot)
       const [baseURL, setBaseURL] = useState(DEFAULT_BASE_URL)
       const [apiKey, setApiKey] = useState('')
@@ -372,7 +439,7 @@ window.__ModuleLoader__.load({
         setFeedback({ text: '', error: false })
         try {
           validBaseURL(nextBaseURL, messages)
-          await installInitialProfile(remote, scope, nextBaseURL, nextApiKey, messages)
+          await installInitialProfile(remote, form, nextBaseURL, nextApiKey, messages, namespace)
           setApiKey('')
           setFeedback({ text: t('saved'), error: false })
         } catch (error) {
@@ -476,9 +543,9 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       const remote = ctx.get('remote')
       const locale = ctx.locale
-      const settingsScope = ctx.settingsScope
+      const configForms = ctx.configForms
+      const settingsSchema = ctx.settingsSchema
       const t = locale.bind(SETTINGS_LOCALE_NS)
-      const scope = settingsScope.bind({ namespace: PI_NS })
 
       ctx.effect(
         () => locale.register(SETTINGS_LOCALE_NS, copy),
@@ -491,13 +558,14 @@ window.__ModuleLoader__.load({
         order: 30,
         label: () => t('tab'),
         locale: SETTINGS_LOCALE_NS,
-        inject: () => ({ remote, scope }),
+        inject: () => ({ remote, configForms, settingsSchema }),
       }, SettingsTab))
     }
 
     exports.apply = apply
     exports.inject = inject
     exports.installInitialProfile = installInitialProfile
+    exports.settingsNamespaceOf = settingsNamespaceOf
     exports.settingsTab = SettingsTab
     return module.exports
   },

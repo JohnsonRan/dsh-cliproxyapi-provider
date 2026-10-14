@@ -8,7 +8,9 @@
 
 ## 使用方式
 
-当前版本适配 DeepSeek Harness `0.1.5-rc.3`，使用新版 Remote API，不兼容旧版 `connection.api` 接口。
+当前版本适配 DeepSeek Harness `0.2.0-rc.2`。0.2 起设置按插件条目（profile entry）保存，本插件通过
+`ctx.settings.describe()` / `ctx.settings.mutate()` 读写 `llm-pi-ai` 条目的 `providers`，并跟随
+`settings/document-updated` 事件刷新；不再兼容 0.1.x。
 
 安装插件：
 

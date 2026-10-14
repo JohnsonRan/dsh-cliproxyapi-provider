@@ -8,7 +8,10 @@ The plugin automatically retrieves the model list from CLIProxyAPI, so models do
 
 ## Usage
 
-This version targets DeepSeek Harness `0.1.5-rc.3` and uses the Remote API, not the legacy `connection.api` interface.
+This version targets DeepSeek Harness `0.2.0-rc.2`. Since 0.2 the configuration lives on each plugin
+entry, so this plugin reads and writes the `providers` field of the `llm-pi-ai` entry through
+`ctx.settings.describe()` / `ctx.settings.mutate()` and refreshes on `settings/document-updated`.
+It no longer supports the 0.1.x line.
 
 Install the plugin:
 
