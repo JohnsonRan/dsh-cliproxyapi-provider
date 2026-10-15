@@ -75,10 +75,6 @@ export function llmPiAiSection(ctx) {
   return { ns, section: descriptor?.value, revision: descriptor?.revision }
 }
 
-function isSettingsConflict(error) {
-  return error?.code === 'SETTINGS_CONFLICT'
-}
-
 /** Read one provider profile out of a resolved pi-ai section. */
 export function providerProfileOf(section) {
   return section?.providers?.[PROVIDER]
@@ -426,8 +422,9 @@ export function apply(ctx, config) {
           else if (hasProfile && !rerun) wakeAfter(config.refreshIntervalMs)
         } catch (error) {
           if (controller.signal.aborted || stopped) continue
-          if (isSettingsConflict(error)) {
-            if (authOnly) authOnlyRequested = true
+          // A refused write reruns on the fresh profile. A full refresh also
+          // covers an auth-only run, which would be followed by one anyway.
+          if (error?.code === 'SETTINGS_CONFLICT') {
             rerun = true
             continue
           }
