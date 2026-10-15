@@ -235,7 +235,7 @@ async function discoverCatalog(ctx, options, suppliedApiKey, parentSignal) {
         hasApiKey: apiKey !== undefined,
       }
     } catch (error) {
-      throw new Error('Expected a CLIProxyAPI model listing with a "data" array of chat models', { cause: error })
+      throw new Error('Unusable CLIProxyAPI model listing; ' + error.message, { cause: error })
     }
   } finally {
     request.dispose()

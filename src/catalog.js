@@ -128,7 +128,7 @@ export function modelProfileOf(entry, options = {}) {
 }
 
 export function readModelListing(body, options = {}) {
-  if (!body || !Array.isArray(body.data)) throw new TypeError('CLIProxyAPI model listing has no "data" array')
+  if (!body || !Array.isArray(body.data)) throw new TypeError('the response has no "data" array')
   const models = []
   const seen = new Set()
   for (const entry of body.data) {
@@ -137,7 +137,7 @@ export function readModelListing(body, options = {}) {
     seen.add(model.id)
     models.push(model)
   }
-  if (!models.length) throw new TypeError('CLIProxyAPI model listing contains no usable chat models')
+  if (!models.length) throw new TypeError('it lists no usable chat models (models that only output embeddings, rerank, decisions or images are skipped)')
   return models
 }
 

@@ -104,5 +104,5 @@ test('rejects malformed and empty listings', () => {
   assert.throws(() => readModelListing({ data: [] }), /no usable chat models/)
   assert.throws(() => readModelListing({ data: [
     { id: 'embed', architecture: { output_modalities: ['embeddings'] } },
-  ] }), /no usable chat models/)
+  ] }), /no usable chat models \(models that only output embeddings/)
 })

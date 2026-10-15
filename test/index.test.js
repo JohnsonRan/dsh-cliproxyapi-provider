@@ -582,6 +582,15 @@ test('catalog transport failures keep their actionable host-side diagnostics', a
       assert.match(String(error.cause?.message), /exceeds 4 MiB/)
       return true
     })
+
+    // The Settings page shows only the message, so the reason must reach it.
+    globalThis.fetch = async () => new Response(JSON.stringify({ data: [
+      { id: 'text-embedding-3-large', architecture: { output_modalities: ['embeddings'] } },
+    ] }), { status: 200 })
+    await assert.rejects(discover(request()), /no usable chat models \(models that only output embeddings/)
+
+    globalThis.fetch = async () => new Response(JSON.stringify({ models: [] }), { status: 200 })
+    await assert.rejects(discover(request()), /Unusable CLIProxyAPI model listing; the response has no "data" array/)
     harness.dispose()
   } finally {
     globalThis.fetch = previousFetch
