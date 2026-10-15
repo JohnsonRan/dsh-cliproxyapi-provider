@@ -45,8 +45,9 @@ function normalizeReasoningLevel(value) {
 
 /**
  * Levels a budget-only model can tell apart. CPA converts a level to its
- * budget and clamps it into [min, max], so a level below `min` collapses onto
- * `min`, while the first level above `max` still selects `max` itself.
+ * budget and clamps it into [min, max]: the last level below `min` still
+ * selects `min` and the first level above `max` still selects `max`, while
+ * further levels past either bound only repeat them.
  */
 function budgetLevelsOf(budget) {
   const min = Number.isFinite(budget?.min) ? Math.max(0, budget.min) : 0
@@ -54,9 +55,14 @@ function budgetLevelsOf(budget) {
   if (max <= 0) return []
   const levels = []
   let highest = 0
+  let belowMin
   for (const [level, tokens] of BUDGET_LEVELS) {
-    if (tokens < min) continue
+    if (tokens < min) {
+      belowMin = level
+      continue
+    }
     if (tokens <= max) {
+      if (!levels.length && belowMin && tokens > min) levels.push(belowMin)
       levels.push(level)
       highest = tokens
     } else {
@@ -81,9 +87,13 @@ export function reasoningEffortsOf(entry) {
       const normalized = normalizeReasoningLevel(raw)
       if (normalized && !(normalized.canonical in efforts)) efforts[normalized.canonical] = normalized.wire
     }
-  } else if (reasoning.budget && typeof reasoning.budget === 'object') {
-    if (reasoning.budget.zero_allowed === true) efforts.off = 'none'
-    for (const level of budgetLevelsOf(reasoning.budget)) efforts[level] = level
+  }
+  // Declared levels win; a budget only speaks when they offer nothing beyond
+  // "off", such as a model listing `levels: [none]` beside its budget range.
+  const budget = reasoning.budget
+  if (Object.keys(efforts).every((level) => level === 'off') && budget && typeof budget === 'object') {
+    if (budget.zero_allowed === true) efforts.off = 'none'
+    for (const level of budgetLevelsOf(budget)) efforts[level] = level
   }
   // llm-pi-ai rejects a capability map that offers only "off". Omitting the
   // field correctly describes a non-reasoning model for a hand-declared route.

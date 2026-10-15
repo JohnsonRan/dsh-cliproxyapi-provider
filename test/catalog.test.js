@@ -25,6 +25,27 @@ test('derives levels CPA can tell apart from a budget-only declaration', () => {
   assert.deepEqual(reasoningEffortsOf({ reasoning: {
     supported: true, budget: { min: 1024, max: 64000, zero_allowed: true, dynamic_allowed: false },
   } }), { off: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' })
+  // A floor between two levels keeps the level below it, which clamps to it.
+  assert.deepEqual(reasoningEffortsOf({ reasoning: {
+    supported: true, budget: { min: 4096, max: 32768 },
+  } }), { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' })
+  // A floor on a level boundary adds nothing below it.
+  assert.deepEqual(reasoningEffortsOf({ reasoning: {
+    supported: true, budget: { min: 1024, max: 8192 },
+  } }), { low: 'low', medium: 'medium' })
+  // A range inside one gap still offers a single selectable level.
+  assert.deepEqual(reasoningEffortsOf({ reasoning: {
+    supported: true, budget: { min: 4096, max: 4096 },
+  } }), { medium: 'medium' })
+})
+
+test('declared levels win over a budget unless they offer only off', () => {
+  assert.deepEqual(reasoningEffortsOf({ reasoning: {
+    supported: true, levels: ['low', 'high'], budget: { min: 128, max: 32768 },
+  } }), { low: 'low', high: 'high' })
+  assert.deepEqual(reasoningEffortsOf({ reasoning: {
+    supported: true, levels: ['none'], budget: { min: 1024, max: 8192, zero_allowed: false },
+  } }), { off: 'none', low: 'low', medium: 'medium' })
 })
 
 test('maps a fully declared listing entry', () => {
