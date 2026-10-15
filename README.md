@@ -6,6 +6,11 @@
 
 插件会自动从 CLIProxyAPI 获取模型列表，无需手动添加或维护模型。
 
+模型列表来自 CLIProxyAPI 的普通 `GET /v1/models`。每个模型的上下文长度、输出上限、图片输入和思考档位分别取自
+`context_length`、`top_provider.max_completion_tokens`、`architecture` 和 `reasoning` 字段；声明的输出
+不含文本的模型（embeddings、rerank、decisions、图片生成）会被跳过。模型没声明的信息按插件默认值处理：只接受
+文本输入、不思考。所以不输出这些字段的 CLIProxyAPI 版本仍然能用，但所有模型都会被当作纯文本、不思考的模型。
+
 ## 使用方式
 
 当前版本适配 DeepSeek Harness `0.2.0-rc.2`。0.2 起设置按插件条目（profile entry）保存，本插件通过

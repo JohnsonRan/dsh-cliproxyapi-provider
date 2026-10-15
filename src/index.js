@@ -3,7 +3,7 @@ import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { assertUsableApiKey, attributionHeaders } from '@deepseek-ai/dsh-llm'
 import { Config as PiAiConfig } from '@deepseek-ai/dsh-llm-pi-ai'
-import { catalogURL, readCodexCatalog } from './catalog.js'
+import { catalogURL, readModelListing } from './catalog.js'
 
 const MAX_CATALOG_BYTES = 4 * 1024 * 1024
 const DISCOVERY_HANDOFF_TTL_MS = 60000
@@ -231,11 +231,11 @@ async function discoverCatalog(ctx, options, suppliedApiKey, parentSignal) {
     }
     try {
       return {
-        models: readCodexCatalog(body, options),
+        models: readModelListing(body, options),
         hasApiKey: apiKey !== undefined,
       }
     } catch (error) {
-      throw new Error('Expected the CLIProxyAPI Codex catalog with a "models" array', { cause: error })
+      throw new Error('Expected a CLIProxyAPI model listing with a "data" array of chat models', { cause: error })
     }
   } finally {
     request.dispose()

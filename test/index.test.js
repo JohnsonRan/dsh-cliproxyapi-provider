@@ -183,12 +183,13 @@ test('initial discovery requests the fixed rich catalog and returns full capabil
   let requestURL
   globalThis.fetch = async (url) => {
     requestURL = String(url)
-    return new Response(JSON.stringify({ models: [{
-      slug: 'gpt-5.6-sol',
-      display_name: 'GPT 5.6 Sol',
-      max_context_window: 372000,
-      input_modalities: ['text', 'image'],
-      supported_reasoning_levels: [{ effort: 'low' }, { effort: 'high' }],
+    return new Response(JSON.stringify({ object: 'list', data: [{
+      id: 'gpt-5.6-sol',
+      object: 'model',
+      name: 'GPT 5.6 Sol',
+      context_length: 372000,
+      architecture: { input_modalities: ['text', 'image'], output_modalities: ['text'] },
+      reasoning: { supported: true, levels: ['low', 'high'] },
     }] }), { status: 200 })
   }
   try {
@@ -202,7 +203,7 @@ test('initial discovery requests the fixed rich catalog and returns full capabil
     })
     assert.equal(
       requestURL,
-      'http://127.0.0.1:8317/v1/models?client_version=dsh-cliproxyapi-provider',
+      'http://127.0.0.1:8317/v1/models',
     )
     assert.deepEqual(models[0], {
       id: 'gpt-5.6-sol',
@@ -223,21 +224,23 @@ test('first profile synchronization restores capabilities stripped by the browse
   let fetches = 0
   globalThis.fetch = async () => {
     fetches += 1
-    return new Response(JSON.stringify({ models: [
+    return new Response(JSON.stringify({ object: 'list', data: [
       {
-        slug: 'gpt-5.6-sol',
-        display_name: 'GPT 5.6 Sol',
-        max_context_window: 372000,
-        input_modalities: ['text', 'image'],
-        supported_reasoning_levels: [
-          { effort: 'low' }, { effort: 'medium' }, { effort: 'high' },
-          { effort: 'xhigh' }, { effort: 'max' },
-        ],
+        id: 'gpt-5.6-sol',
+        name: 'GPT 5.6 Sol',
+        context_length: 372000,
+        architecture: { input_modalities: ['text', 'image'], output_modalities: ['text'] },
+        reasoning: { supported: true, levels: ['low', 'medium', 'high', 'xhigh', 'max'] },
       },
       {
-        slug: 'gpt-5.6-spark',
-        display_name: 'GPT 5.6 Spark',
-        input_modalities: ['text'],
+        id: 'gpt-5.6-spark',
+        name: 'GPT 5.6 Spark',
+        architecture: { input_modalities: ['text'], output_modalities: ['text'] },
+      },
+      {
+        id: 'text-embedding-3-large',
+        architecture: { output_modalities: ['embeddings'] },
+        reasoning: { supported: false },
       },
     ] }), { status: 200 })
   }
@@ -280,6 +283,7 @@ test('first profile synchronization restores capabilities stripped by the browse
       compat: { chatTemplateKwargs: {}, chatTemplateArgs: {} },
     })
     assert.deepEqual(profile.models[1].input, ['text'])
+    assert.deepEqual(profile.models.map((model) => model.id), ['gpt-5.6-sol', 'gpt-5.6-spark'])
     await waitFor(() => harness.timeouts.some((row) => row.delay === 300000))
     const periodic = harness.timeouts.find((row) => row.delay === 300000)
     periodic.callback()
@@ -294,10 +298,10 @@ test('first profile synchronization restores capabilities stripped by the browse
 
 test('credential refresh cannot finalize a pending bootstrap profile early', async () => {
   const previousFetch = globalThis.fetch
-  globalThis.fetch = async () => new Response(JSON.stringify({ models: [{
-    slug: 'vision-model',
-    input_modalities: ['text', 'image'],
-    supported_reasoning_levels: [{ effort: 'high' }],
+  globalThis.fetch = async () => new Response(JSON.stringify({ data: [{
+    id: 'vision-model',
+    architecture: { input_modalities: ['text', 'image'] },
+    reasoning: { supported: true, levels: ['high'] },
   }] }), { status: 200 })
   try {
     const harness = createContext({ providers: {} })
@@ -337,7 +341,7 @@ test('keyless profiles omit apiKeyEnv and receive a non-sensitive placeholder he
   let fetches = 0
   globalThis.fetch = async () => {
     fetches += 1
-    return new Response(JSON.stringify({ models: [{ slug: 'model-a' }] }), { status: 200 })
+    return new Response(JSON.stringify({ data: [{ id: 'model-a' }] }), { status: 200 })
   }
   try {
     const harness = createContext({ providers: {
@@ -364,7 +368,7 @@ test('refreshIntervalMs zero disables healthy periodic refreshes', async () => {
   let fetches = 0
   globalThis.fetch = async () => {
     fetches += 1
-    return new Response(JSON.stringify({ models: [{ slug: 'model-a' }] }), { status: 200 })
+    return new Response(JSON.stringify({ data: [{ id: 'model-a' }] }), { status: 200 })
   }
   try {
     const harness = createContext({ providers: {
@@ -382,7 +386,7 @@ test('refreshIntervalMs zero disables healthy periodic refreshes', async () => {
 
 test('credential removal regenerates the profile in keyless mode', async () => {
   const previousFetch = globalThis.fetch
-  globalThis.fetch = async () => new Response(JSON.stringify({ models: [{ slug: 'model-a' }] }), { status: 200 })
+  globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'model-a' }] }), { status: 200 })
   try {
     const harness = createContext({ providers: {
       CLIProxyAPI: managedProfile({
@@ -412,7 +416,7 @@ test('credential removal regenerates the profile in keyless mode', async () => {
 
 test('a renamed pi-ai entry keeps its own id as the settings namespace', async () => {
   const previousFetch = globalThis.fetch
-  globalThis.fetch = async () => new Response(JSON.stringify({ models: [{ slug: 'model-a' }] }), { status: 200 })
+  globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'model-a' }] }), { status: 200 })
   try {
     // A deployment may rename the profile entry; `options.name` stays the
     // composition's own name, so the entry (and therefore the write target) is
@@ -446,7 +450,7 @@ test('a newer settings change aborts stale discovery and only installs the lates
         options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true })
       })
     }
-    return new Response(JSON.stringify({ models: [{ slug: 'model-b' }] }), { status: 200 })
+    return new Response(JSON.stringify({ data: [{ id: 'model-b' }] }), { status: 200 })
   }
   try {
     const harness = createContext({ providers: {
@@ -481,7 +485,7 @@ test('a profile edit outside the refresh key during discovery is not reverted', 
       markStarted()
       await gate
     }
-    return new Response(JSON.stringify({ models: [{ slug: 'model-b' }] }), { status: 200 })
+    return new Response(JSON.stringify({ data: [{ id: 'model-b' }] }), { status: 200 })
   }
   try {
     const harness = createContext({ providers: {
@@ -613,11 +617,11 @@ test('real Cordis composition leaves llm-pi-ai as the sole directory owner', asy
   globalThis.fetch = async (input, init) => {
     const url = input instanceof Request ? input.url : String(input)
     const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
-    if (method === 'GET' && url.includes('/models?')) {
+    if (method === 'GET' && url.endsWith('/models')) {
       catalogFetches += 1
-      return new Response(JSON.stringify({ models: [
-        { slug: 'plain', supported_reasoning_levels: [{ effort: 'none' }] },
-        { slug: 'think', supported_reasoning_levels: [{ effort: 'none' }, { effort: 'high' }] },
+      return new Response(JSON.stringify({ data: [
+        { id: 'plain', reasoning: { supported: false } },
+        { id: 'think', reasoning: { supported: true, levels: ['none', 'high'] } },
       ] }), { status: 200 })
     }
     const headers = new Headers(input instanceof Request ? input.headers : undefined)
