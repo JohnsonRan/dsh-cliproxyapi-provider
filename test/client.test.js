@@ -155,6 +155,11 @@ test('client owns only its Settings slot and keeps the configuration accessible'
   assert.match(source, /apiKeyDirty/)
   assert.match(source, /!baseURLDirty/)
   assert.match(source, /!apiKeyDirty/)
+  const submitSource = source.slice(source.indexOf('const submit ='), source.indexOf('const statusText ='))
+  assert.ok(
+    submitSource.indexOf('validBaseURL(') < submitSource.indexOf('setSaving(true)'),
+    'URL validation must run before setting saving state',
+  )
 })
 
 for (const apiKey of ['', 'test-api-key']) {

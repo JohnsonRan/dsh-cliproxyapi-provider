@@ -441,10 +441,18 @@ window.__ModuleLoader__.load({
         if (!canSave) return
         const nextBaseURL = baseURL.trim().replace(/\/+$/, '')
         const nextApiKey = apiKey.trim()
-        setSaving(true)
         setFeedback({ text: '', error: false })
         try {
           validBaseURL(nextBaseURL, messages)
+        } catch (error) {
+          setFeedback({
+            text: error instanceof Error ? error.message : String(error),
+            error: true,
+          })
+          return
+        }
+        setSaving(true)
+        try {
           await installInitialProfile(remote, form, nextBaseURL, nextApiKey, messages, namespace)
           setBaseURL(nextBaseURL)
           setApiKey('')
