@@ -151,6 +151,10 @@ test('client owns only its Settings slot and keeps the configuration accessible'
   assert.doesNotMatch(source, /remote\.\$on\('settings\/document-updated'/)
   assert.match(source, /remote\.\$on\('credentials\/reference-updated'/)
   assert.match(source, /role: 'status'/)
+  assert.match(source, /baseURLDirty/)
+  assert.match(source, /apiKeyDirty/)
+  assert.match(source, /!baseURLDirty/)
+  assert.match(source, /!apiKeyDirty/)
 })
 
 for (const apiKey of ['', 'test-api-key']) {

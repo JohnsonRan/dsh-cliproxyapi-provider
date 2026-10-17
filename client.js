@@ -396,6 +396,8 @@ window.__ModuleLoader__.load({
       const profile = profileOf(snapshot)
       const [baseURL, setBaseURL] = useState(DEFAULT_BASE_URL)
       const [apiKey, setApiKey] = useState('')
+      const [baseURLDirty, setBaseURLDirty] = useState(false)
+      const [apiKeyDirty, setApiKeyDirty] = useState(false)
       const [loadedRevision, setLoadedRevision] = useState(undefined)
       const [credentialStatus, setCredentialStatus] = useState('unknown')
       const [saving, setSaving] = useState(false)
@@ -407,12 +409,16 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (snapshot.status !== 'ready' || snapshot.revision === undefined) return
         if (snapshot.revision === loadedRevision) return
-        setBaseURL(typeof profile?.baseURL === 'string' && profile.baseURL.length > 0
-          ? profile.baseURL
-          : DEFAULT_BASE_URL)
-        setApiKey('')
+        if (!baseURLDirty) {
+          setBaseURL(typeof profile?.baseURL === 'string' && profile.baseURL.length > 0
+            ? profile.baseURL
+            : DEFAULT_BASE_URL)
+        }
+        if (!apiKeyDirty) {
+          setApiKey('')
+        }
         setLoadedRevision(snapshot.revision)
-      }, [loadedRevision, profile?.baseURL, snapshot.revision, snapshot.status])
+      }, [apiKeyDirty, baseURLDirty, loadedRevision, profile?.baseURL, snapshot.revision, snapshot.status])
 
       useEffect(() => {
         let active = true
@@ -440,7 +446,10 @@ window.__ModuleLoader__.load({
         try {
           validBaseURL(nextBaseURL, messages)
           await installInitialProfile(remote, form, nextBaseURL, nextApiKey, messages, namespace)
+          setBaseURL(nextBaseURL)
           setApiKey('')
+          setBaseURLDirty(false)
+          setApiKeyDirty(false)
           setFeedback({ text: t('saved'), error: false })
         } catch (error) {
           setFeedback({
@@ -486,7 +495,10 @@ window.__ModuleLoader__.load({
               value: baseURL,
               autoComplete: 'url',
               disabled: !canSave,
-              onChange: (event) => setBaseURL(event.currentTarget.value),
+              onChange: (event) => {
+                setBaseURL(event.currentTarget.value)
+                setBaseURLDirty(true)
+              },
             }),
           ),
           React.createElement(
@@ -513,7 +525,10 @@ window.__ModuleLoader__.load({
                 : t('apiKeyPlaceholder'),
               autoComplete: 'off',
               disabled: !canSave,
-              onChange: (event) => setApiKey(event.currentTarget.value),
+              onChange: (event) => {
+                setApiKey(event.currentTarget.value)
+                setApiKeyDirty(true)
+              },
             }),
           ),
           feedback.text
