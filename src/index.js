@@ -327,7 +327,7 @@ export function apply(ctx, config) {
     return handoff.models
   }
 
-  ctx.llm.registerModelDiscovery(DISCOVERY_NS, async (request) => {
+  ctx.llm.registerModelDiscovery(DISCOVERY_NS, async (request, signal) => {
     const catalog = await discoverCatalog(ctx, {
       baseURL: request.baseURL,
       defaultContextWindow: config.defaultContextWindow,
@@ -335,7 +335,7 @@ export function apply(ctx, config) {
       defaultInput: config.defaultInput,
       headers: config.headers,
       fetchTimeoutMs: config.fetchTimeoutMs,
-    }, request.apiKey, request.signal)
+    }, request.apiKey, signal)
     rememberDiscovery(request.baseURL, catalog.models)
     return catalog.models
   })

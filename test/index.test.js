@@ -199,8 +199,7 @@ test('initial discovery requests the fixed rich catalog and returns full capabil
       provider: 'CLIProxyAPI',
       baseURL: 'http://127.0.0.1:8317/v1',
       apiKey: 'secret-key',
-      signal: new AbortController().signal,
-    })
+    }, new AbortController().signal)
     assert.equal(
       requestURL,
       'http://127.0.0.1:8317/v1/models',
@@ -213,6 +212,31 @@ test('initial discovery requests the fixed rich catalog and returns full capabil
       input: ['text', 'image'],
       reasoningEfforts: { low: 'low', high: 'high' },
     })
+    harness.dispose()
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('discovery honors positional abort signal', async () => {
+  const previousFetch = globalThis.fetch
+  const controller = new AbortController()
+  globalThis.fetch = async (_url, options) => {
+    if (options.signal?.aborted) throw options.signal.reason
+    return new Promise((resolve, reject) => {
+      options.signal?.addEventListener('abort', () => reject(options.signal.reason), { once: true })
+    })
+  }
+  try {
+    const harness = createContext({ providers: {} })
+    apply(harness.ctx, await resolvedConfig({ fetchTimeoutMs: 5000 }))
+    const discover = harness.discoveries.get('llm-cliproxyapi')
+    const discoveryPromise = discover({
+      provider: 'CLIProxyAPI',
+      baseURL: 'http://127.0.0.1:8317/v1',
+    }, controller.signal)
+    controller.abort(new Error('discovery canceled'))
+    await assert.rejects(discoveryPromise, /discovery canceled/)
     harness.dispose()
   } finally {
     globalThis.fetch = previousFetch
@@ -251,8 +275,7 @@ test('first profile synchronization restores capabilities stripped by the browse
     const discovered = await harness.discoveries.get('llm-cliproxyapi')({
       provider: 'CLIProxyAPI',
       baseURL: 'http://127.0.0.1:8317/v1',
-      signal: new AbortController().signal,
-    })
+    }, new AbortController().signal)
     const bootstrapModels = discovered.map(({ id, name, contextWindow, maxTokens }) => ({
       id, name, contextWindow, maxTokens,
     }))
@@ -749,8 +772,7 @@ test('real Cordis composition leaves llm-pi-ai as the sole directory owner', asy
     const discovered = await ctx.llm.discoverModels('llm-cliproxyapi', {
       provider: 'CLIProxyAPI',
       baseURL: 'http://127.0.0.1:8317/v1',
-      signal: new AbortController().signal,
-    })
+    }, new AbortController().signal)
     // The browser-facing RPC narrows every discovered model to
     // id/name/contextWindow/maxTokens (0.2 also keeps `inputModalities`), so the
     // pi-ai capability fields never survive the round trip.
