@@ -15,7 +15,7 @@ still works, but every model is treated as a text-only, non-reasoning model.
 
 ## Usage
 
-This version targets DeepSeek Harness `0.2.0-rc.2`. Since 0.2 the configuration lives on each plugin
+This version targets DeepSeek Harness `0.2.0-rc.2` and `0.2.1` (including `0.2.1-rc.*`). Since 0.2 the configuration lives on each plugin
 entry, so this plugin reads and writes the `providers` field of the `llm-pi-ai` entry through
 `ctx.settings.describe()` / `ctx.settings.mutate()` and refreshes on `settings/document-updated`.
 It no longer supports the 0.1.x line.
